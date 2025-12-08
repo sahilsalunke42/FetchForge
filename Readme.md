@@ -7,7 +7,6 @@ The library provides automatic retry logic, AbortController-based timeouts, in-m
 
 ## 📘 Documentation  
 Full documentation (coming soon):  
-👉 https://your-docs-link-here.com
 
 ---
 
