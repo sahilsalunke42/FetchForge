@@ -1,6 +1,6 @@
 {
   "name": "forgefetch",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A TypeScript-first unified HTTP client with retries, timeouts, rate limits, caching, queueing, and middleware on top of fetch.",
   "keywords": [
     "sdk",
