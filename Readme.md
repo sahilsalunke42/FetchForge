@@ -1,5 +1,3 @@
-md
-
 # ForgeFetch
 A TypeScript-first HTTP client with **retries, timeouts, caching, rate-limits, queueing, and middleware**, built on top of native `fetch`.
 
