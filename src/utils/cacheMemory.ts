@@ -1,4 +1,3 @@
-
 import { ClientResponse } from "../client/response";
 
 export interface ICacheProvider {
@@ -12,17 +11,26 @@ export interface ICacheProvider {
 }
 
 export class MemoryCache implements ICacheProvider {
-    private cache: Map<string, { value: ClientResponse; expiry: number; createdAt: number; lastAccessed: number }>;
+    private cache: Map<string, {
+        value: ClientResponse;
+        expiry: number;
+        createdAt: number;
+        lastAccessed: number;
+    }>;
+
     private maxEntries: number;
-    private enableLRU: boolean
+    private enableLRU: boolean;
     private defaultTTLMs: number;
-    private staleWindowMs: number
+    private staleWindowMs: number;
     private enableStaleWhileRevalidate: boolean;
-    private cleanupIntervalMs: number
+    private cleanupIntervalMs: number;
     private clock: () => number;
+
     private inFlightRefreshes: Map<string, Promise<void>>;
     private cleanupTimer: NodeJS.Timeout | null;
-    
+
+    private fetcher?: (key: string) => Promise<ClientResponse>;
+
     constructor(config?: {
         maxEntries?: number;
         enableLRU?: boolean;
@@ -32,7 +40,8 @@ export class MemoryCache implements ICacheProvider {
         cleanupIntervalMs?: number;
         clock?: () => number;
     }) {
-        this.cache = new Map(); 
+        this.cache = new Map();
+
         this.maxEntries = config?.maxEntries ?? 1000;
         this.enableLRU = config?.enableLRU ?? true;
         this.defaultTTLMs = config?.defaultTTLMs ?? 5 * 60 * 1000;
@@ -40,9 +49,15 @@ export class MemoryCache implements ICacheProvider {
         this.enableStaleWhileRevalidate = config?.enableStaleWhileRevalidate ?? true;
         this.cleanupIntervalMs = config?.cleanupIntervalMs ?? 10 * 60 * 1000;
         this.clock = config?.clock ?? (() => Date.now());
+
         this.inFlightRefreshes = new Map();
         this.cleanupTimer = null;
+
         this.startCleanupTimer();
+    }
+
+    setFetcher(fetcher: (key: string) => Promise<ClientResponse>) {
+        this.fetcher = fetcher;
     }
 
     private startCleanupTimer() {
@@ -50,6 +65,7 @@ export class MemoryCache implements ICacheProvider {
             this.cleanupTimer = setInterval(() => this.cleanup(), this.cleanupIntervalMs);
         }
     }
+
     private stopCleanupTimer() {
         if (this.cleanupTimer) {
             clearInterval(this.cleanupTimer);
@@ -65,95 +81,136 @@ export class MemoryCache implements ICacheProvider {
             }
         }
     }
+
     get(key: string): ClientResponse | null {
-        const entry = this.cache.get(key);
         const now = this.clock();
+        const entry = this.cache.get(key);
+
         if (!entry) return null;
+
+        // expired
         if (entry.expiry < now) {
-            if (this.enableStaleWhileRevalidate && (now - entry.expiry) <= this.staleWindowMs) {
+            const age = now - entry.expiry;
+
+            // stale-while-revalidate path
+            if (this.enableStaleWhileRevalidate && age <= this.staleWindowMs) {
                 this.triggerRefresh(key);
                 return entry.value;
             }
+
+            // fully expired → remove entry
+            this.cache.delete(key);
             return null;
         }
+
+        // Update LRU metadata
         if (this.enableLRU) {
             entry.lastAccessed = now;
             this.cache.delete(key);
             this.cache.set(key, entry);
         }
+
         return entry.value;
     }
+
     set(key: string, data: ClientResponse, ttlMs?: number): void {
         const now = this.clock();
         const expiry = now + (ttlMs ?? this.defaultTTLMs);
-        this.cache.set(key, { value: data, expiry, createdAt: now, lastAccessed: now });
+
+        const existing = this.cache.get(key);
+        const createdAt = existing?.createdAt ?? now;
+
+        this.cache.set(key, {
+            value: data,
+            expiry,
+            createdAt,
+            lastAccessed: now
+        });
+
         if (this.cache.size > this.maxEntries) {
             this.evict();
         }
     }
+
     delete(key: string): void {
         this.cache.delete(key);
+        this.inFlightRefreshes.delete(key);
     }
+
     clear(): void {
         this.cache.clear();
+        this.inFlightRefreshes.clear();
     }
+
     has(key: string): boolean {
         const entry = this.cache.get(key);
         if (!entry) return false;
+
         const now = this.clock();
-        if (entry.expiry < now) {
-            return false;
-        }
+        if (entry.expiry < now) return false;
+
         return true;
     }
+
     size(): number {
         this.cleanup();
         return this.cache.size;
     }
+
     keys(): string[] {
         this.cleanup();
         return Array.from(this.cache.keys());
-    }   
+    }
+
     private evict() {
         if (this.enableLRU) {
             let oldestKey: string | null = null;
             let oldestAccess = Infinity;
+
             for (const [key, entry] of this.cache.entries()) {
                 if (entry.lastAccessed < oldestAccess) {
                     oldestAccess = entry.lastAccessed;
                     oldestKey = key;
                 }
             }
+
             if (oldestKey) {
                 this.cache.delete(oldestKey);
+                this.inFlightRefreshes.delete(oldestKey);
             }
         } else {
             const firstKey = this.cache.keys().next().value;
             if (firstKey !== undefined) {
                 this.cache.delete(firstKey);
+                this.inFlightRefreshes.delete(firstKey);
             }
         }
     }
 
+
     private async triggerRefresh(key: string) {
-        if (this.inFlightRefreshes.has(key)) {
-            return;
-        }
-        const refreshPromise = this.refresh(key).finally(() => {
+        if (!this.fetcher) return; // no fetcher → do nothing
+        if (this.inFlightRefreshes.has(key)) return;
+
+        const promise = this.refresh(key).finally(() => {
             this.inFlightRefreshes.delete(key);
         });
-        this.inFlightRefreshes.set(key, refreshPromise);
+
+        this.inFlightRefreshes.set(key, promise);
     }
+
     private async refresh(key: string) {
-        // Placeholder: actual refresh logic to fetch new data and update cache
-        // This would typically involve calling a provided fetcher function
-        // For demonstration, we'll just simulate a delay
-        await new Promise(res => setTimeout(res, 1000));
-        // After fetching new data, update the cache
-        // this.set(key, newData, this.defaultTTLMs);
-    }   
+        if (!this.fetcher) return;
+
+        try {
+            const newValue = await this.fetcher(key);
+            this.set(key, newValue, this.defaultTTLMs);
+        } catch {
+            // ignore refresh failures, keep stale entry
+        }
+    }
+
     dispose() {
         this.stopCleanupTimer();
     }
 }
-

@@ -1,206 +1,138 @@
-// httpClient.ts — corrected minimal version (no queue, no adapters yet)
-
 import { ClientRequest } from "./request";
 import { ClientResponse, ClientResponseImpl } from "./response";
+import { MemoryCache } from "../utils/cacheMemory";
+import { RateLimiter } from "../utils/rateLimiter";
+import { computeBackoff } from "../utils/backoff";
+import { RequestQueue } from "../utils/queue";
+import { runBeforeMiddlewares, BeforeMiddleware } from "../middleware/beforeMiddleware";
+import { runAfterMiddlewares, AfterMiddleware } from "../middleware/afterMiddleware";
 import {
-    NetworkError,
-    TimeoutError,
-    HTTPError,
-    RetryLimitExceededError,
-    RateLimitError,
-    AbortError
+  NetworkError,
+  TimeoutError,
+  HTTPError,
+  RetryLimitExceededError
 } from "../core/Errors";
 
-class CacheProvider {
-    private cache: Map<string, { data: ClientResponse; expiry: number }>;
-
-    constructor() {
-        this.cache = new Map();
-    }
-
-    get(key: string): ClientResponse | null {
-        const entry = this.cache.get(key);
-        if (!entry) return null;
-
-        if (entry.expiry < Date.now()) {
-            this.cache.delete(key);
-            return null;
-        }
-        return entry.data;
-    }
-
-    set(key: string, data: ClientResponse, ttlMs: number) {
-        this.cache.set(key, { data, expiry: Date.now() + ttlMs });
-    }
-}
-
-
-class RateLimiter {
-    private tokens: number;
-    private lastRefill: number;
-    private capacity: number;
-    private refillRate: number;
-
-    constructor({ maxRequestsPerSecond }: { maxRequestsPerSecond: number }) {
-        this.capacity = maxRequestsPerSecond;
-        this.tokens = maxRequestsPerSecond;
-        this.refillRate = maxRequestsPerSecond / 1000;
-        this.lastRefill = Date.now();
-    }
-
-    private refill() {
-        const now = Date.now();
-        const elapsed = now - this.lastRefill;
-        this.tokens = Math.min(this.capacity, this.tokens + elapsed * this.refillRate);
-        this.lastRefill = now;
-    }
-
-    async consume() {
-        this.refill();
-        if (this.tokens >= 1) {
-            this.tokens -= 1;
-            return;
-        }
-        throw new RateLimitError(1000 / this.refillRate, "Rate limit exceeded");
-    }
-}
-
-// Exponential backoff with jitter
-function computeBackoff(attempt: number) {
-    const base = 100 * Math.pow(2, attempt); // 100, 200, 400...
-    const jitter = Math.random() * 50;
-    return base + jitter;
-}
-
-
-
-type BeforeMiddleware = (req: ClientRequest) => Promise<ClientRequest> | ClientRequest;
-type AfterMiddleware = (res: ClientResponse) => Promise<ClientResponse> | ClientResponse;
-
-
-
 export class HttpClient {
-    private cache = new CacheProvider();
-    private rateLimiter: RateLimiter;
+  private cache: MemoryCache;
+  private rateLimiter: RateLimiter;
+  private queue: RequestQueue;
 
-    private beforeMiddlewares: BeforeMiddleware[] = [];
-    private afterMiddlewares: AfterMiddleware[] = [];
+  private beforeMiddlewares: BeforeMiddleware[] = [];
+  private afterMiddlewares: AfterMiddleware[] = [];
 
-    constructor({ maxRequestsPerSecond }: { maxRequestsPerSecond: number }) {
-        this.rateLimiter = new RateLimiter({ maxRequestsPerSecond });
+  constructor(config: {
+    maxRequestsPerSecond: number;
+    maxConcurrency: number;
+    cacheProvider?: MemoryCache;
+    limiter?: RateLimiter;
+  }) {
+    this.cache = config.cacheProvider ?? new MemoryCache();
+    this.rateLimiter = config.limiter ?? new RateLimiter({ maxRequestsPerSecond: config.maxRequestsPerSecond });
+    this.queue = new RequestQueue(config.maxConcurrency);
+
+    this.cache.setFetcher(async (key) => {
+      return this.executeWithoutRetry(JSON.parse(key));
+    });
+  }
+
+  useBefore(mw: BeforeMiddleware) {
+    this.beforeMiddlewares.push(mw);
+  }
+
+  useAfter(mw: AfterMiddleware) {
+    this.afterMiddlewares.push(mw);
+  }
+
+  async sendRequest<T = any>(req: ClientRequest): Promise<ClientResponse<T>> {
+    req = await runBeforeMiddlewares(req, this.beforeMiddlewares);
+
+    await this.rateLimiter.consume();
+
+    const cacheKey = JSON.stringify(req);
+
+    const cached = req.cache?.enabled
+      ? this.cache.get(cacheKey)
+      : null;
+
+    if (cached) {
+      return await runAfterMiddlewares(cached as ClientResponse<T>, this.afterMiddlewares);
     }
 
-    useBefore(mw: BeforeMiddleware) {
-        this.beforeMiddlewares.push(mw);
-    }
+    const maxRetries = req.retry?.retries ?? 0;
+    let attempt = 0;
 
-    useAfter(mw: AfterMiddleware) {
-        this.afterMiddlewares.push(mw);
-    }
+    while (true) {
+      try {
+        const response = await this.queue.enqueue(() => this.executeOnce<T>(req));
 
-    private async runBefore(req: ClientRequest) {
-        for (const mw of this.beforeMiddlewares) req = await mw(req);
-        return req;
-    }
+        if (!response.ok) {
+          throw new HTTPError(response.status, "  HTTP error occurred");
+        }
 
-    private async runAfter(res: ClientResponse) {
-        for (const mw of this.afterMiddlewares) res = await mw(res);
-        return res;
-    }
-
-
-    async sendRequest<T = any>(req: ClientRequest): Promise<ClientResponse<T>> {
-        req = await this.runBefore(req);
-
-        // enforce rate limit
-        await this.rateLimiter.consume();
-
-        const key = `${req.method}:${req.url}`;
-
-        // cache check
         if (req.cache?.enabled) {
-            const hit = this.cache.get(key);
-            if (hit) return hit as ClientResponse<T>;
+          this.cache.set(cacheKey, response, req.cache.durationMs);
         }
 
-        const maxRetries = req.retry?.retries ?? 0;
-        let attempt = 0;
+        return await runAfterMiddlewares(response, this.afterMiddlewares);
+      } catch (err) {
+        const retryEligible =
+          err instanceof TimeoutError ||
+          err instanceof NetworkError ||
+          (err instanceof HTTPError && err.statusCode >= 500);
 
-        while (true) {
-            try {
-                const response = await this.executeOnce<T>(req);
-
-                if (!response.ok) {
-                    throw new HTTPError(response.status, "  HTTP error occurred");
-                }
-
-                if (req.cache?.enabled) {
-                    this.cache.set(key, response, req.cache.durationMs);
-                }
-
-                return await this.runAfter(response);
-            }
-            catch (err: any) {
-
-                if (attempt >= maxRetries) {
-                    throw new RetryLimitExceededError("Retry limit exceeded");
-                }
-
-                if (
-                    err instanceof TimeoutError ||
-                    err instanceof NetworkError ||
-                    err instanceof HTTPError && err.statusCode >= 500
-                ) {
-                    const delay = computeBackoff(attempt);
-                    await new Promise(res => setTimeout(res, delay));
-                    attempt++;
-                    continue;
-                }
-
-                throw err;
-            }
+        if (!retryEligible || attempt >= maxRetries) {
+          throw new RetryLimitExceededError("Retry limit exceeded");
         }
+
+        const delay = computeBackoff(attempt);
+        await new Promise((res) => setTimeout(res, delay));
+        attempt++;
+      }
+    }
+  }
+
+  private async executeOnce<T>(req: ClientRequest): Promise<ClientResponse<T>> {
+    return this.executeWithoutRetry(req);
+  }
+
+  private async executeWithoutRetry<T>(req: ClientRequest): Promise<ClientResponse<T>> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), req.timeoutMs);
+
+    const start = Date.now();
+    let raw: Response;
+
+    try {
+      raw = await fetch(req.url, {
+        method: req.method,
+        headers: req.headers,
+        body: req.body,
+        signal: controller.signal
+      });
+    } catch (err: any) {
+      clearTimeout(timeout);
+      if (err.name === "AbortError") throw new TimeoutError("Request timed out");
+      throw new NetworkError("Request failed due to network issues");
     }
 
+    clearTimeout(timeout);
 
-    private async executeOnce<T>(req: ClientRequest): Promise<ClientResponse<T>> {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), req.timeoutMs);
-
-        let raw: Response;
-        const start = Date.now();
-
-        try {
-            raw = await fetch(req.url, {
-                method: req.method,
-                headers: req.headers,
-                body: req.body,
-                signal: controller.signal
-            });
-        }
-        catch (e: any) {
-            clearTimeout(timeout);
-            if (e.name === "AbortError") throw new TimeoutError("Request timed out");
-            throw new NetworkError("Request failed due to network issues");
-        }
-
-        clearTimeout(timeout);
-
-        let body: string | null = null;
-        try {
-            body = await raw.text();
-        } catch {
-            body = null;
-        }
-
-        return new ClientResponseImpl<T>({
-            url: req.url,
-            method: req.method,
-            status: raw.status,
-            headers: Object.fromEntries(raw.headers.entries()),
-            body,
-            ok: raw.ok,
-            durationMs: Date.now() - start
-        });
+    let body: string | null = null;
+    try {
+      body = await raw.text();
+    } catch {
+      body = null;
     }
+
+    return new ClientResponseImpl<T>({
+      url: req.url,
+      method: req.method,
+      status: raw.status,
+      headers: Object.fromEntries(raw.headers.entries()),
+      body,
+      ok: raw.ok,
+      durationMs: Date.now() - start
+    });
+  }
 }
