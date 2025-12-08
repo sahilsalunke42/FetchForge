@@ -1,16 +1,21 @@
 {
-  "name": "fetchforge",
+  "name": "forgefetch",
   "version": "1.0.0",
   "description": "A TypeScript-first unified HTTP client with retries, timeouts, rate limits, caching, queueing, and middleware on top of fetch.",
-  "keywords": ["sdk", "http-client", "fetch", "typescript"],
+  "keywords": [
+    "sdk",
+    "http-client",
+    "fetch",
+    "typescript"
+  ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/sahilsalunke42/FetchForge"
+    "url": "git+https://github.com/sahilsalunke42/FetchForge.git"
   },
   "license": "MIT",
   "author": "Sahil Salunke",
-  "main": "dist/index.cjs",
-  "module": "dist/index.js",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsup src/index.ts --format esm,cjs --dts"
@@ -22,4 +27,3 @@
     "typescript": "^5.9.3"
   }
 }
-
