@@ -1,5 +1,7 @@
 # ForgeFetch
-A TypeScript-first HTTP client with **retries, timeouts, caching, rate-limits, queueing, and middleware**, built on top of native `fetch`.
+ForgeFetch is a TypeScript-first HTTP client designed to fix the limitations of native fetch() and make API communication reliable in real-world applications. While fetch is lightweight, it lacks essential production features like retries, timeouts, caching, rate limits, concurrency control, and middleware support. ForgeFetch layers these capabilities on top of the Fetch API with a clean, typed interface that behaves consistently in both Node and Browser environments.
+
+The library provides automatic retry logic, AbortController-based timeouts, in-memory caching with TTL and LRU, a token-bucket rate limiter, a request queue for concurrency control, and a full middleware pipeline similar to Axios interceptors. With strong TypeScript typing, predictable behavior, and built-in resilience, ForgeFetch serves as a robust foundation for any application that relies heavily on HTTP requests—microservices, AI tools, dashboards, or modern full-stack apps.
 
 ---
 
