@@ -1,12 +1,3 @@
-Escanor — understood.
-Here is your **short professional README**, with a **clean placeholder section** for your upcoming documentation site.
-
-This is the ideal balance: compact, usable, and ready for production.
-
----
-
-# 🚀 **FINAL README.md (Short + Docs Link Placeholder)**
-
 ````md
 # ForgeFetch
 A TypeScript-first HTTP client with **retries, timeouts, caching, rate-limits, queueing, and middleware**, built on top of native `fetch`.
@@ -133,6 +124,6 @@ client.useAfter(res => {
 
 MIT © 2025 Sahil Salunke
 
-```
+````
 
 
