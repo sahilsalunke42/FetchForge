@@ -7,7 +7,7 @@ The library provides automatic retry logic, AbortController-based timeouts, in-m
 
 ## 📘 Documentation  
 Full documentation: 
- [Documentation (https://forgefetch-web-329j.vercel.app/)]
+ [Documentation] (https://forgefetch-web-329j.vercel.app/)
 
 ---
 
